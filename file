@@ -1,0 +1,354 @@
+"""
+Text-Mining-in-Employee-Feedback-Surveys (synthetic data)
+
+Generates synthetic employee feedback (>100 points) and performs:
+ - preprocessing (tokenize, remove stopwords, lemmatize)
+ - sentiment analysis (VADER)
+ - TF-IDF keyword extraction
+ - KMeans clustering
+ - LDA topic modeling (gensim)
+ - saves dataset and plots to /mnt/data/text_mining_feedback/
+
+Dependencies:
+ pip install numpy pandas matplotlib seaborn scikit-learn nltk gensim wordcloud openpyxl
+
+Run:
+ python text_mining_employee_feedback.py
+"""
+import os
+import random
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.cluster import KMeans
+from sklearn.decomposition import TruncatedSVD
+from sklearn.manifold import TSNE
+from sklearn.metrics import silhouette_score
+
+# NLP
+import nltk
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+from nltk import word_tokenize
+from nltk.sentiment import SentimentIntensityAnalyzer
+
+# Topic modeling
+import gensim
+from gensim import corpora
+from wordcloud import WordCloud
+
+# Ensure necessary NLTK downloads
+nltk.download("punkt")
+nltk.download("stopwords")
+nltk.download("wordnet")
+nltk.download("omw-1.4")
+nltk.download("vader_lexicon")
+
+RANDOM_SEED = 42
+np.random.seed(RANDOM_SEED)
+random.seed(RANDOM_SEED)
+
+OUT_DIR = "/mnt/data/text_mining_feedback"
+os.makedirs(OUT_DIR, exist_ok=True)
+os.makedirs(os.path.join(OUT_DIR, "plots"), exist_ok=True)
+
+########################
+# 1) Synthetic data generation
+########################
+def generate_synthetic_feedback(n_samples=500):
+    """
+    Create synthetic employee feedback samples mixing positive, negative, and neutral content.
+    """
+    # Base phrases and templates for different sentiment categories
+    positives = [
+        "I appreciate the supportive leadership and clear communication.",
+        "Great teamwork and collaborative environment, I feel valued.",
+        "Opportunities for growth and training are excellent.",
+        "Flexible working hours and good work-life balance.",
+        "Management recognises effort and rewards performance."
+    ]
+    negatives = [
+        "Too much bureaucracy and slow decision-making.",
+        "Workload is high and deadlines are unrealistic.",
+        "Poor communication from leadership, unclear priorities.",
+        "Lack of career advancement and inadequate training.",
+        "Compensation is not competitive and benefits are weak."
+    ]
+    neutrals = [
+        "I work on project tasks and attend regular meetings.",
+        "Daily routine involves standard responsibilities and reports.",
+        "Office resources are available but sometimes require updates.",
+        "We have scheduled check-ins and team updates.",
+        "Tasks are assigned based on project needs."
+    ]
+
+    # add topic expansions for departments and common themes
+    departments = ["engineering", "sales", "hr", "product", "operations", "it", "finance", "marketing"]
+    themes = ["communication", "work-life balance", "leadership", "training", "compensation", "tools", "processes"]
+
+    records = []
+    for i in range(n_samples):
+        # choose sentiment bias
+        r = random.random()
+        if r < 0.4:
+            template = random.choice(positives)
+            sentiment = "positive"
+        elif r < 0.8:
+            template = random.choice(neutrals)
+            sentiment = "neutral"
+        else:
+            template = random.choice(negatives)
+            sentiment = "negative"
+
+        # add department, theme and some random modifiers
+        dept = random.choice(departments)
+        theme = random.choice(themes)
+        # modifiers to increase lexical variety
+        modifiers = [
+            "Overall, ",
+            "Frankly, ",
+            "In my experience, ",
+            "To be honest, ",
+            ""
+        ]
+        mod = random.choice(modifiers)
+
+        # occasional numeric mention or example
+        examples = [
+            "",
+            " e.g., last quarter we had multiple last-minute requests.",
+            " for instance during peak season.",
+            " especially during product launches.",
+            " as seen in recent sprints."
+        ]
+        example = random.choice(examples)
+
+        # combine
+        feedback = f"{mod}{template} This is common in the {dept} team, often about {theme}.{example}"
+        # add some chance of compound sentences to vary length
+        if random.random() < 0.25:
+            extra = random.choice(positives + neutrals + negatives)
+            feedback = f"{feedback} {extra}"
+
+        records.append({
+            "employee_id": f"E{1000 + i}",
+            "department": dept,
+            "feedback": feedback,
+            "sentiment_label": sentiment  # synthetic ground truth (approx)
+        })
+
+    df = pd.DataFrame.from_records(records)
+    return df
+
+########################
+# 2) Preprocessing
+########################
+stop_words = set(stopwords.words("english"))
+lemmatizer = WordNetLemmatizer()
+
+def preprocess_text(text):
+    # basic lowercasing
+    text = str(text).lower()
+    # tokenize
+    tokens = word_tokenize(text)
+    # remove non-alphabetic tokens and stop words, lemmatize
+    tokens = [lemmatizer.lemmatize(t) for t in tokens if t.isalpha() and t not in stop_words and len(t) > 2]
+    return tokens
+
+def preprocess_text_join(text):
+    return " ".join(preprocess_text(text))
+
+########################
+# 3) Analysis pipeline
+########################
+def run_analysis(df):
+    # Preprocess and add columns
+    df["feedback_clean_tokens"] = df["feedback"].apply(preprocess_text)
+    df["feedback_clean"] = df["feedback_clean_tokens"].apply(lambda toks: " ".join(toks))
+
+    # Save cleaned dataset
+    out_csv = os.path.join(OUT_DIR, "synthetic_employee_feedback_clean.csv")
+    df.to_csv(out_csv, index=False)
+    print("Saved cleaned dataset to:", out_csv)
+
+    # Sentiment analysis using VADER (rule-based)
+    sia = SentimentIntensityAnalyzer()
+    df["vader_compound"] = df["feedback"].apply(lambda t: sia.polarity_scores(str(t))["compound"])
+    # map to simple sentiment category for visualization
+    def vader_label(c):
+        if c >= 0.05:
+            return "positive"
+        elif c <= -0.05:
+            return "negative"
+        else:
+            return "neutral"
+    df["vader_sentiment"] = df["vader_compound"].apply(vader_label)
+
+    # Save sentiment summary
+    sent_summary = df["vader_sentiment"].value_counts().to_frame("count")
+    sent_summary.to_csv(os.path.join(OUT_DIR, "sentiment_summary.csv"))
+
+    # Plot sentiment distribution
+    plt.figure(figsize=(6,4))
+    sns.countplot(x="vader_sentiment", data=df, order=["positive","neutral","negative"])
+    plt.title("Sentiment Distribution (VADER)")
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUT_DIR, "plots", "sentiment_distribution.png"), dpi=150)
+    plt.close()
+
+    # TF-IDF vectorization for keyword extraction and clustering
+    vectorizer = TfidfVectorizer(max_df=0.8, min_df=2, ngram_range=(1,2), max_features=2000)
+    X_tfidf = vectorizer.fit_transform(df["feedback_clean"].values)
+
+    # Top TF-IDF keywords per document - example for first 5 rows
+    feature_names = np.array(vectorizer.get_feature_names_out())
+    def top_keywords(vec, k=8):
+        if vec.nnz == 0:
+            return []
+        row = vec.toarray().ravel()
+        top_idx = row.argsort()[::-1][:k]
+        return feature_names[top_idx].tolist()
+    df["top_keywords"] = [top_keywords(X_tfidf[i]) for i in range(X_tfidf.shape[0])]
+    df.to_csv(os.path.join(OUT_DIR, "synthetic_employee_feedback_with_keywords.csv"), index=False)
+
+    # Create a wordcloud for entire corpus
+    all_text = " ".join(df["feedback_clean"].tolist())
+    wc = WordCloud(width=800, height=400, background_color="white").generate(all_text)
+    plt.figure(figsize=(10,5))
+    plt.imshow(wc, interpolation="bilinear")
+    plt.axis("off")
+    plt.title("WordCloud - Employee Feedback (cleaned)")
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUT_DIR, "plots", "wordcloud_feedback.png"), dpi=150)
+    plt.close()
+
+    # Clustering with KMeans (choose k by simple heuristic)
+    # Try a few k and pick the one with highest silhouette score
+    best_k = None
+    best_score = -1
+    best_kmodel = None
+    for k in range(2, 7):
+        kmodel = KMeans(n_clusters=k, random_state=RANDOM_SEED, n_init=10)
+        labels = kmodel.fit_predict(X_tfidf)
+        if len(set(labels)) > 1:
+            score = silhouette_score(X_tfidf, labels)
+        else:
+            score = -1
+        print(f"k={k}, silhouette={score:.3f}")
+        if score > best_score:
+            best_score = score
+            best_k = k
+            best_kmodel = kmodel
+    print("Selected k (best silhouette):", best_k)
+
+    # assign cluster labels
+    df["kcluster"] = best_kmodel.predict(X_tfidf)
+
+    # save clustering summary
+    cluster_summary = df.groupby("kcluster").feedback.count().to_frame("count")
+    cluster_summary.to_csv(os.path.join(OUT_DIR, "cluster_summary.csv"))
+
+    # visualize top terms per cluster using mean TF-IDF
+    tfidf_array = X_tfidf.toarray()
+    for cl in sorted(df["kcluster"].unique()):
+        mean_tfidf = tfidf_array[df["kcluster"]==cl].mean(axis=0)
+        top_idx = mean_tfidf.argsort()[::-1][:12]
+        top_terms = feature_names[top_idx]
+        plt.figure(figsize=(6,3))
+        sns.barplot(x=mean_tfidf[top_idx], y=top_terms)
+        plt.title(f"Top terms - Cluster {cl}")
+        plt.tight_layout()
+        plt.savefig(os.path.join(OUT_DIR, "plots", f"top_terms_cluster_{cl}.png"), dpi=150)
+        plt.close()
+
+    # Dimensionality reduction (SVD) and t-SNE for visualization
+    svd = TruncatedSVD(n_components=50, random_state=RANDOM_SEED)
+    X_svd = svd.fit_transform(X_tfidf)
+    tsne = TSNE(n_components=2, random_state=RANDOM_SEED, perplexity=30, n_iter=800, learning_rate=200)
+    X_tsne = tsne.fit_transform(X_svd)
+    df["tsne_1"] = X_tsne[:,0]
+    df["tsne_2"] = X_tsne[:,1]
+
+    plt.figure(figsize=(8,6))
+    sns.scatterplot(x="tsne_1", y="tsne_2", hue="kcluster", data=df, palette="tab10", legend="full")
+    plt.title("t-SNE visualization of feedback clusters")
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUT_DIR, "plots", "tsne_clusters.png"), dpi=150)
+    plt.close()
+
+    # Topic modeling using gensim LDA
+    tokenized_texts = df["feedback_clean_tokens"].tolist()
+    # Build dictionary and corpus
+    dictionary = corpora.Dictionary(tokenized_texts)
+    dictionary.filter_extremes(no_below=3, no_above=0.6, keep_n=2000)
+    corpus = [dictionary.doc2bow(text) for text in tokenized_texts]
+    # choose number of topics (small)
+    NUM_TOPICS = 6
+    lda = gensim.models.LdaModel(corpus=corpus,
+                                id2word=dictionary,
+                                num_topics=NUM_TOPICS,
+                                random_state=RANDOM_SEED,
+                                passes=10,
+                                iterations=100)
+    # Save topics
+    topics = lda.print_topics(num_words=8)
+    with open(os.path.join(OUT_DIR, "lda_topics.txt"), "w") as f:
+        for tid, topic in topics:
+            f.write(f"Topic {tid}: {topic}\n")
+    print("Saved LDA topics.")
+
+    # Assign dominant topic per document
+    doc_topics = []
+    for bow in corpus:
+        topic_probs = lda.get_document_topics(bow)
+        # pick highest probability topic
+        if topic_probs:
+            topic_probs_sorted = sorted(topic_probs, key=lambda x: -x[1])
+            doc_topics.append(topic_probs_sorted[0][0])
+        else:
+            doc_topics.append(-1)
+    df["lda_topic"] = doc_topics
+    df.to_csv(os.path.join(OUT_DIR, "synthetic_employee_feedback_with_topics.csv"), index=False)
+
+    # Save top words per topic as plots
+    for t in range(NUM_TOPICS):
+        terms = lda.show_topic(t, topn=12)
+        words = [w for w,c in terms]
+        weights = [c for w,c in terms]
+        plt.figure(figsize=(6,3))
+        sns.barplot(x=weights, y=words)
+        plt.title(f"LDA Topic {t}")
+        plt.tight_layout()
+        plt.savefig(os.path.join(OUT_DIR, "plots", f"lda_topic_{t}.png"), dpi=150)
+        plt.close()
+
+    # Save final dataframe and a small report
+    df.to_excel(os.path.join(OUT_DIR, "synthetic_employee_feedback_results.xlsx"), index=False)
+    summary = {
+        "n_samples": len(df),
+        "vader_positive": int((df["vader_sentiment"]=="positive").sum()),
+        "vader_neutral": int((df["vader_sentiment"]=="neutral").sum()),
+        "vader_negative": int((df["vader_sentiment"]=="negative").sum()),
+        "n_clusters": int(best_k),
+        "n_topics": int(NUM_TOPICS)
+    }
+    with open(os.path.join(OUT_DIR, "analysis_summary.txt"), "w") as f:
+        for k,v in summary.items():
+            f.write(f"{k}: {v}\n")
+    print("Saved results and summary to:", OUT_DIR)
+
+    return df, lda
+
+########################
+# Run end-to-end
+########################
+def main():
+    n_samples = 500  # ensure >100
+    df = generate_synthetic_feedback(n_samples)
+    df_results, lda_model = run_analysis(df)
+
+if __name__ == "__main__":
+    main()
